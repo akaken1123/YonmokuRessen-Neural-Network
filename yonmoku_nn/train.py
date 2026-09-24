@@ -1,4 +1,5 @@
 import argparse
+import copy
 import glob
 from pathlib import Path
 
@@ -16,6 +17,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4,
+                         help="Adamのweight decay。過学習を抑えるための正則化")
     parser.add_argument("--out", default="checkpoints/model.pt")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -40,9 +43,13 @@ def main():
 
     device = torch.device(args.device)
     model = YonmokuNet().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     policy_loss_fn = torch.nn.CrossEntropyLoss()
     value_loss_fn = torch.nn.MSELoss()
+
+    best_val_loss = float("inf")
+    best_epoch = -1
+    best_state = None
 
     for epoch in range(args.epochs):
         model.train()
@@ -67,12 +74,20 @@ def main():
                 val_loss += loss.item() * x.size(0)
         avg_val_loss = val_loss / len(val_set)
 
-        print(f"epoch {epoch + 1}/{args.epochs}: train_loss={avg_loss:.4f} val_loss={avg_val_loss:.4f}")
+        is_best = avg_val_loss < best_val_loss
+        if is_best:
+            best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
+            best_state = copy.deepcopy(model.state_dict())
+
+        marker = " *" if is_best else ""
+        print(f"epoch {epoch + 1}/{args.epochs}: train_loss={avg_loss:.4f} val_loss={avg_val_loss:.4f}{marker}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), out_path)
-    print(f"saved model to {out_path}")
+    # 最終エポックではなく、検証lossが最も良かった時点の重みを保存する（過学習したものを使わないため）。
+    torch.save(best_state, out_path)
+    print(f"saved best model (epoch {best_epoch}, val_loss={best_val_loss:.4f}) to {out_path}")
 
 
 if __name__ == "__main__":

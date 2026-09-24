@@ -4,9 +4,23 @@
 
 ## 全体像
 
-1. **データ収集**：YonmokuRessenのJavaサーバーを起動しておき、REST API経由でAI対AI（デフォルトAI・テストAI・テスト3AI・学習AI等）の対局を作らせる。サーバー側が既に持っている `AiVsAiDriver`（対局作成後、人手を介さず自動で最後まで打ち切る仕組み）と `/api/games/{id}/history`（着手ごとの盤面・HP・保留ダメージなどの全履歴）をそのまま使うので、盤面ルール（除外・相殺・バックアタック・ダメージ増加マーク）をPython側に再実装する必要はありません。
-2. **学習**：収集した「局面 → 実際に打たれた手 → 最終的な勝敗」のデータから、PyTorchで方策（どの手を打つか）と価値（その局面がどれくらい有利か）を予測するネットワークを教師あり学習する。
-3. **エクスポート**：学習済みモデルをONNX形式で書き出す。Java側での推論統合（`AiLevel`への新しいレベル追加など）は今後の作業。
+2つの学習方式があります。
+
+**方式A：既存AIの模倣（教師あり学習、`yonmoku_nn.selfplay` / `yonmoku_nn.train`）**
+1. YonmokuRessenのJavaサーバーを起動しておき、REST API経由でAI対AI（デフォルトAI・テストAI・テスト3AI・学習AI等）の対局を作らせる。サーバー側が既に持っている `AiVsAiDriver`（対局作成後、人手を介さず自動で最後まで打ち切る仕組み）と `/api/games/{id}/history`（着手ごとの盤面・HP・保留ダメージなどの全履歴）をそのまま使う。
+2. 収集した「局面 → 実際に打たれた手 → 最終的な勝敗」のデータから、PyTorchで方策・価値を教師あり学習する。強さは模倣元のAI次第（模倣元より強くはならない）。
+
+**方式B：MCTS自己対戦（強化学習、`yonmoku_nn.rl_selfplay` / `yonmoku_nn.train_rl`）**
+1. ネットワーク自身の方策・価値を使ってPUCT（MCTS）で先読みしながら自己対戦する。手番ごとにサーバーの
+   ステートレスなシミュレーションAPI（`/api/simulate/move`）を呼んで、実際の対局を作らずに「もしここに
+   打ったら」を何度も試す（盤面ルールはここでもJava側の実装をそのまま使う）。
+2. 収集した「局面 → MCTSの訪問回数分布（方策ターゲット） → 最終的な勝敗」のデータで学習し直す。
+3. 学習したネットワークで再度自己対戦→再学習…を繰り返すことで、模倣元の強さを超えて成長できる
+   （AlphaZeroと同じ考え方）。ただし1回のループが方式Aより重い（MCTSのシミュレーション回数分だけ
+   サーバーへの通信とネットワーク推論が発生する）。
+
+いずれの方式も、最後にONNX形式へエクスポートする（Java側での推論統合は`YonmokuRessen`本体の
+`AiLevel.NEURAL`で対応済み）。
 
 ## セットアップ
 
@@ -46,6 +60,32 @@ python -m yonmoku_nn.train --data "data/*.jsonl" --epochs 20 --out checkpoints/m
 python -m yonmoku_nn.export --checkpoint checkpoints/model.pt --out checkpoints/model.onnx
 ```
 
+### 方式B：MCTS自己対戦（強化学習ループ）
+
+YonmokuRessenサーバーを起動した状態で（対局を作る必要はない。ステートレスなシミュレーションAPIだけを使う）：
+
+```bash
+# 1. 自己対戦でデータを集める（--checkpointを省略するとランダム初期化のネットワークから始まる）
+python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
+  --checkpoint checkpoints/model.pt --games 20 --simulations 100 \
+  --out data/rl_selfplay_gen1.jsonl
+
+# 2. そのデータで学習する
+python -m yonmoku_nn.train_rl --data "data/rl_selfplay_gen1.jsonl" \
+  --init-checkpoint checkpoints/model.pt --out checkpoints/model_rl_gen1.pt
+
+# 3. 新しい重みを使って、また自己対戦データを集める（世代を進める）
+python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
+  --checkpoint checkpoints/model_rl_gen1.pt --games 20 --simulations 100 \
+  --out data/rl_selfplay_gen2.jsonl
+# ... 3を繰り返す
+```
+
+`--simulations`（1手あたりのMCTSシミュレーション回数）を増やすほど自己対戦の質は上がりますが、
+1手あたりの時間（シミュレーションAPI呼び出し＋ネットワーク推論の回数）も比例して増えます。
+まずは少ない局数・シミュレーション回数でパイプライン全体が回ることを確認してから、
+GPU環境や計算時間に応じて増やしていくのがおすすめです。
+
 ## 盤面のエンコーディング（`yonmoku_nn/encoding.py`）
 
 9×9の各マスについて、以下のチャンネル（面）を持つテンソルとして表現します（`perspective`＝その局面で着手する側の色を基準に、常に「自分/相手」で正規化）。
@@ -68,5 +108,6 @@ python -m yonmoku_nn.export --checkpoint checkpoints/model.pt --out checkpoints/
 
 ## 今後の予定（未着手）
 
-- Java側（YonmokuRessen本体）にONNXモデルを読み込んで推論する新しい`AiLevel`を追加する。
-- 教師あり学習（既存AIの模倣）だけでなく、MCTS + 自己対戦によるAlphaZero的な強化学習ループへの拡張。
+- 強化学習ループの自動化（自己対戦→学習→新旧比較→昇格、を1コマンドで回す。今は手動で3ステップを繰り返す）。
+- MCTSの並列化（現状は1手ごとに逐次シミュレーションしており、対局を複数並行させることはできるが、
+  1局内のシミュレーション自体は並列化していない）。

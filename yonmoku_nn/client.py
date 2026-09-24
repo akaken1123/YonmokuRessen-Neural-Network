@@ -45,6 +45,9 @@ class SimulationClient:
 
     def __init__(self, base_url: str = "http://localhost:8080"):
         self.base_url = base_url.rstrip("/")
+        # MCTSは1局・1手あたり何度もこのAPIを叩くため、リクエストのたびに新しいTCP接続を
+        # 張るrequests.post()の代わりにSessionでコネクションを使い回し、往復のオーバーヘッドを減らす。
+        self.session = requests.Session()
 
     def initial_state(self, size: int = 9) -> dict:
         """1手目より前の初期状態。GameRoom.reset()の初期値と一致させてある。"""
@@ -64,7 +67,7 @@ class SimulationClient:
         }
 
     def simulate_move(self, state: dict, row: int, col: int) -> dict:
-        resp = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/api/simulate/move",
             json={"state": state, "row": row, "col": col},
             timeout=10,

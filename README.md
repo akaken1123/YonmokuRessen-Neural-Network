@@ -86,6 +86,18 @@ python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
 まずは少ない局数・シミュレーション回数でパイプライン全体が回ることを確認してから、
 GPU環境や計算時間に応じて増やしていくのがおすすめです。
 
+対局数の割に時間がかかる場合は `--concurrency`（ワーカープロセス数）で並列化できます。
+MCTS探索自体がPython側のCPU処理（ネットワーク推論）なので、`selfplay.py`のような
+スレッド並列ではなくプロセス並列にしてある（物理コア数程度まで増やすと効果が出やすい）。
+YonmokuRessenサーバー側は1リクエストごとに完結するステートレスな処理なので、
+複数ワーカーから同時に叩いても問題ない。
+
+```bash
+python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
+  --checkpoint checkpoints/model.pt --games 20 --simulations 100 \
+  --concurrency 4 --out data/rl_selfplay_gen1.jsonl
+```
+
 ## 盤面のエンコーディング（`yonmoku_nn/encoding.py`）
 
 9×9の各マスについて、以下のチャンネル（面）を持つテンソルとして表現します（`perspective`＝その局面で着手する側の色を基準に、常に「自分/相手」で正規化）。

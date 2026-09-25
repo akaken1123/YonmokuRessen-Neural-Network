@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-  NEURAL AIを複数世代にわたって自動的に強化学習するループ。
-  自己対戦(rl_selfplay, CPU) → 学習(train_rl, GPU) → 評価(evaluate) を1世代分として、
-  指定した世代数だけ繰り返し、結果をログファイル（training_log_日時.txt）に記録する。
+  Runs the NEURAL AI reinforcement-learning loop (self-play -> train -> evaluate) for
+  several generations in a row, unattended, logging progress and each generation's
+  win rate against TEST3 to a timestamped log file.
 
-  実行前に別ウィンドウでYonmokuRessenサーバーを起動しておくこと。
-  対人戦用にNEURAL_MCTS_SIMULATIONSは200〜400程度に戻しておくのがおすすめ
-  （評価のたびに時間がかかりすぎるのを防ぐため）。
+  Start the YonmokuRessen server in another window before running this. For an
+  unattended overnight run, set NEURAL_MCTS_SIMULATIONS back to something modest
+  (e.g. 200-400) on the server so each evaluation game doesn't take too long.
 
-  リポジトリのルート（YonmokuRessen-Neural-Network）から実行すること。
+  Run this from the repository root (YonmokuRessen-Neural-Network).
 
 .EXAMPLE
-  # 今 checkpoints/model_rl_gen2.pt まであるとして、そこから6世代（gen3〜gen8）を回す
+  # checkpoints/model_rl_gen2.pt already exists; run 6 more generations (gen3..gen8)
   .\scripts\run_rl_loop.ps1 -FromGen 2 -Generations 6
 #>
 
@@ -38,52 +38,52 @@ function Write-Log {
     Add-Content -Path $logFile -Value $line
 }
 
-Write-Log "=== RL loop start: from gen$FromGen, $Generations generation(s) requested ==="
+Write-Log "=== RL loop start: from gen ${FromGen}, ${Generations} generation(s) requested ==="
 Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / eval: games=$EvalGames"
 
 try {
     Invoke-WebRequest -Uri $Server -UseBasicParsing -TimeoutSec 5 | Out-Null
 } catch {
-    Write-Log "ERROR: $Server に接続できません。先にYonmokuRessenサーバーを起動してください。中断します。"
+    Write-Log "ERROR: cannot reach $Server. Start the YonmokuRessen server first. Aborting."
     exit 1
 }
 
 $prevGen = $FromGen
 for ($i = 1; $i -le $Generations; $i++) {
     $gen = $prevGen + 1
-    $prevCheckpoint = "checkpoints/model_rl_gen$prevGen.pt"
-    $selfplayOut = "data/rl_selfplay_gen$gen.jsonl"
-    $newCheckpoint = "checkpoints/model_rl_gen$gen.pt"
+    $prevCheckpoint = "checkpoints/model_rl_gen${prevGen}.pt"
+    $selfplayOut = "data/rl_selfplay_gen${gen}.jsonl"
+    $newCheckpoint = "checkpoints/model_rl_gen${gen}.pt"
 
     if (-not (Test-Path $prevCheckpoint)) {
-        Write-Log "ERROR: $prevCheckpoint が見つかりません。中断します。"
+        Write-Log "ERROR: $prevCheckpoint not found. Aborting."
         exit 1
     }
 
-    Write-Log "--- gen$gen: 自己対戦 ($SelfplayGames局, simulations=$SelfplaySimulations, concurrency=$SelfplayConcurrency) ---"
+    Write-Log "--- gen ${gen}: self-play ($SelfplayGames games, simulations=$SelfplaySimulations, concurrency=$SelfplayConcurrency) ---"
     & $PythonCpu -m yonmoku_nn.rl_selfplay --checkpoint $prevCheckpoint --games $SelfplayGames `
         --simulations $SelfplaySimulations --concurrency $SelfplayConcurrency --out $selfplayOut
     if ($LASTEXITCODE -ne 0) {
-        Write-Log "ERROR: rl_selfplay が gen$gen で失敗しました (exit $LASTEXITCODE)。中断します。"
+        Write-Log "ERROR: rl_selfplay failed at gen ${gen} (exit $LASTEXITCODE). Aborting."
         exit 1
     }
 
-    Write-Log "--- gen$gen: 学習 (GPU) ---"
+    Write-Log "--- gen ${gen}: training (GPU) ---"
     & $PythonGpu -m yonmoku_nn.train_rl --data $selfplayOut --init-checkpoint $prevCheckpoint --out $newCheckpoint
     if ($LASTEXITCODE -ne 0) {
-        Write-Log "ERROR: train_rl が gen$gen で失敗しました (exit $LASTEXITCODE)。中断します。"
+        Write-Log "ERROR: train_rl failed at gen ${gen} (exit $LASTEXITCODE). Aborting."
         exit 1
     }
 
-    Write-Log "--- gen$gen: 評価 (vs TEST3, $EvalGames局) ---"
+    Write-Log "--- gen ${gen}: evaluate (vs TEST3, $EvalGames games) ---"
     $evalOutput = & $PythonCpu -m yonmoku_nn.evaluate --server $Server --opponent TEST3 --games $EvalGames `
         --random-opening-plies 4 --concurrency 4 --candidate $newCheckpoint 2>&1
     $evalOutput | ForEach-Object { Add-Content -Path $logFile -Value $_ }
     $winRateLine = $evalOutput | Select-String "win rate"
-    Write-Log "gen$gen 結果: $winRateLine"
+    Write-Log "gen ${gen} result: $winRateLine"
 
     $prevGen = $gen
 }
 
-Write-Log "=== RL loop finished. 最新チェックポイント: checkpoints/model_rl_gen$prevGen.pt ==="
-Write-Log "ログ全文はこのファイルにあります: $logFile"
+Write-Log "=== RL loop finished. Latest checkpoint: checkpoints/model_rl_gen${prevGen}.pt ==="
+Write-Log "Full log is in this file: $logFile"

@@ -20,7 +20,8 @@
    サーバーへの通信とネットワーク推論が発生する）。
 
 いずれの方式も、最後にONNX形式へエクスポートする（Java側での推論統合は`YonmokuRessen`本体の
-`AiLevel.NEURAL`で対応済み）。
+`AiLevel.NEURAL`で対応済み）。対局時もネットワーク単体の貪欲法ではなく、方式Bと同じPUCT探索
+（`NeuralMcts`、Java側に移植済み）で先読みしてから手を選ぶ。
 
 ## セットアップ
 
@@ -97,6 +98,32 @@ python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
   --checkpoint checkpoints/model.pt --games 20 --simulations 100 \
   --concurrency 4 --out data/rl_selfplay_gen1.jsonl
 ```
+
+### 強い方策から始める（方式A→方式Bの組み合わせ）
+
+方式Bをランダム初期化のネットワークから始めると、序盤の自己対戦の質が低く学習が遅い。
+方式A（TEST3などの模倣）で作ったチェックポイントを方式Bの`--checkpoint`/`--init-checkpoint`に
+渡せば、「強いAIを模倣した状態」からMCTS強化学習を始められる。
+
+```bash
+python -m yonmoku_nn.selfplay --black-ai TEST3 --white-ai TEST3 --games 200 --out data/selfplay_test3.jsonl
+python -m yonmoku_nn.train --data "data/selfplay_test3.jsonl" --out checkpoints/model.pt
+# ここからcheckpoints/model.ptを使って方式Bのループ（rl_selfplay/train_rl）を回す
+```
+
+### 世代ごとの強さの確認（`yonmoku_nn.evaluate`）
+
+方式Bを何世代か回しても、実際にTEST3などの既存AIより強くなっているかは対局してみないと
+わからない（訓練データの量が少ないうちは、むしろ弱くなることもある）。`evaluate.py`は、
+候補のチェックポイントをサーバーへ反映した上で既存AIと実際に対局させ、勝率を測る。
+
+```bash
+python -m yonmoku_nn.evaluate --opponent TEST3 --games 20 --candidate checkpoints/model_rl_gen5.pt
+```
+
+`--candidate`を省略すると、サーバーに現在読み込まれているモデルをそのまま評価する。
+先後を交互にして対局するので、色による有利不利は打ち消される。TEST3に対する勝率が
+世代を追うごとに上がっているかを見ながら、ループを続けるかどうかを判断するとよい。
 
 ## 盤面のエンコーディング（`yonmoku_nn/encoding.py`）
 

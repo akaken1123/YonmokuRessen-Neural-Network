@@ -28,7 +28,6 @@ param(
     [string]$PythonGpu = "..\.venv-rocm\Scripts\python.exe"
 )
 
-$ErrorActionPreference = "Stop"
 $logFile = "training_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
 function Write-Log {
@@ -76,11 +75,19 @@ for ($i = 1; $i -le $Generations; $i++) {
     }
 
     Write-Log "--- gen ${gen}: evaluate (vs TEST3, $EvalGames games) ---"
+    # Do not merge stderr into this capture (no 2>&1): export.py prints a harmless
+    # DeprecationWarning there, and PowerShell can otherwise treat captured native-command
+    # stderr output as an error. Only stdout (the actual progress/result lines) is needed.
     $evalOutput = & $PythonCpu -m yonmoku_nn.evaluate --server $Server --opponent TEST3 --games $EvalGames `
-        --random-opening-plies 4 --concurrency 4 --candidate $newCheckpoint 2>&1
+        --random-opening-plies 4 --concurrency 4 --candidate $newCheckpoint
+    $evalExitCode = $LASTEXITCODE
     $evalOutput | ForEach-Object { Add-Content -Path $logFile -Value $_ }
-    $winRateLine = $evalOutput | Select-String "win rate"
-    Write-Log "gen ${gen} result: $winRateLine"
+    if ($evalExitCode -ne 0) {
+        Write-Log "WARNING: evaluate failed at gen ${gen} (exit $evalExitCode). Checkpoint was still saved; continuing to the next generation."
+    } else {
+        $winRateLine = $evalOutput | Select-String "win rate"
+        Write-Log "gen ${gen} result: $winRateLine"
+    }
 
     $prevGen = $gen
 }

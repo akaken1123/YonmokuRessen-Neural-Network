@@ -13,45 +13,60 @@ NEURAL（NeuralMcts）もTEST3（アルファベータ）も着手選択が完�
 存在せず、--gamesを増やしても同じ対局を繰り返すだけになる。それを避けるため、対局ごとに
 最初の数手（--random-opening-plies）だけランダムな手を人間役として打ってから、両者に
 AIを割り当てて残りを進めさせる（サーバー側の新しいAPI: POST /api/games/{id}/ai）。
+
+対局の進行自体はサーバー側のAiVsAiDriverが独立したスレッドで行うため、selfplay.pyと同様に
+ThreadPoolExecutorで複数局を並行して作成・待機できる（--concurrency）。rl_selfplay.pyの
+マルチプロセス化とは違い、Python側はただ作って待つだけの軽い処理なのでスレッドで十分。
 """
 
 import argparse
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .client import YonmokuClient
 
 
+def _play_one_game(client: YonmokuClient, opponent: str, random_opening_plies: int,
+                    poll_interval: float, timeout: float, neural_color: str) -> str:
+    black_ai, white_ai = ("NEURAL", opponent) if neural_color == "B" else (opponent, "NEURAL")
+    game_id = client.create_game()
+    client.place_random_opening_moves(game_id, random_opening_plies)
+    client.assign_ai(game_id, black_ai, white_ai)
+    history = client.wait_for_completion(game_id, poll_interval=poll_interval, timeout=timeout)
+    return history[-1]["winner"]
+
+
 def play_match(client: YonmokuClient, games: int, opponent: str, random_opening_plies: int,
-                poll_interval: float, timeout: float) -> dict:
+               poll_interval: float, timeout: float, concurrency: int) -> dict:
     wins = losses = draws = failed = 0
-    for g in range(games):
+    completed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
         # 先後を交互にして、色による有利不利（先手番の方が有利、等）を打ち消す。
-        if g % 2 == 0:
-            black_ai, white_ai, neural_color = "NEURAL", opponent, "B"
-        else:
-            black_ai, white_ai, neural_color = opponent, "NEURAL", "W"
+        futures = {
+            executor.submit(_play_one_game, client, opponent, random_opening_plies,
+                             poll_interval, timeout, "B" if g % 2 == 0 else "W"): ("B" if g % 2 == 0 else "W")
+            for g in range(games)
+        }
+        for future in as_completed(futures):
+            neural_color = futures[future]
+            completed += 1
+            try:
+                winner = future.result()
+            except Exception as e:
+                failed += 1
+                print(f"[{completed}/{games}] a game failed, skipping it: {e}")
+                continue
 
-        try:
-            game_id = client.create_game()
-            client.place_random_opening_moves(game_id, random_opening_plies)
-            client.assign_ai(game_id, black_ai, white_ai)
-            history = client.wait_for_completion(game_id, poll_interval=poll_interval, timeout=timeout)
-        except Exception as e:
-            failed += 1
-            print(f"[{g + 1}/{games}] a game failed, skipping it: {e}")
-            continue
-
-        winner = history[-1]["winner"]
-        if winner == neural_color:
-            wins += 1
-        elif winner is None or winner == "draw":
-            draws += 1
-        else:
-            losses += 1
-        print(f"[{g + 1}/{games}] NEURAL={neural_color} vs {opponent} -> winner={winner}")
+            if winner == neural_color:
+                wins += 1
+            elif winner is None or winner == "draw":
+                draws += 1
+            else:
+                losses += 1
+            print(f"[{completed}/{games}] NEURAL={neural_color} vs {opponent} -> winner={winner}")
 
     return {"wins": wins, "losses": losses, "draws": draws, "failed": failed}
 
@@ -69,6 +84,9 @@ def main():
     parser.add_argument("--timeout", type=float, default=300.0,
                          help="1局あたりの最大待ち時間（秒）。NEURALはMCTS探索のぶん1手ごとに"
                               "時間がかかるので、内蔵AI同士より長めにしてある")
+    parser.add_argument("--concurrency", type=int, default=4,
+                         help="同時に進行させる対局数。対局はサーバー側のスレッドで進むため、"
+                              "増やすほど評価が速くなる（サーバーのCPUコア数に応じて調整）")
     parser.add_argument("--candidate", default=None,
                          help="評価したい.ptチェックポイント。省略時はサーバーに現在読み込まれている"
                               "モデルをそのまま評価する")
@@ -93,7 +111,7 @@ def main():
 
     client = YonmokuClient(args.server)
     result = play_match(client, args.games, args.opponent, args.random_opening_plies,
-                         args.poll_interval, args.timeout)
+                         args.poll_interval, args.timeout, args.concurrency)
 
     total = result["wins"] + result["losses"] + result["draws"]
     win_rate = result["wins"] / total if total else 0.0

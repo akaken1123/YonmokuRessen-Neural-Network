@@ -33,6 +33,13 @@ def main():
             "value": {0: "batch"},
         },
         opset_version=17,
+        # 新しいdynamoベースのエクスポーター（torchのバージョンによってはデフォルトが
+        # dynamo=Trueになっている）は、この程度の小さいモデルでも重みを別ファイル
+        # （model.onnx.data）に分けて書き出そうとし、その外部データ書き出し処理に
+        # Windows環境で失敗する既知の不具合がある。dynamic_axesもdynamo=False（従来の
+        # TorchScriptベースのエクスポーター）向けの引数なので、明示的にdynamo=Falseを
+        # 指定し、単一の.onnxファイルにまとめて書き出す。
+        dynamo=False,
     )
     print(f"exported ONNX model to {args.out}")
 

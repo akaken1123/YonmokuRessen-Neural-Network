@@ -7,6 +7,12 @@
 --candidateを指定すると、その.ptチェックポイントを一時的にエクスポートしてサーバーの
 NEURAL_MODEL_FILEに反映してから評価する（サーバーの自動リロードが検知するまで少し待つ）。
 省略した場合は、サーバーに現在読み込まれているモデルをそのまま評価する。
+
+NEURAL（NeuralMcts）もTEST3（アルファベータ）も着手選択が完全に決定論的（乱数を使わない）
+なため、何も工夫しないと「NEURALが先手」「NEURALが後手」の2パターンしか実質的な対局が
+存在せず、--gamesを増やしても同じ対局を繰り返すだけになる。それを避けるため、対局ごとに
+最初の数手（--random-opening-plies）だけランダムな手を人間役として打ってから、両者に
+AIを割り当てて残りを進めさせる（サーバー側の新しいAPI: POST /api/games/{id}/ai）。
 """
 
 import argparse
@@ -18,7 +24,7 @@ from pathlib import Path
 from .client import YonmokuClient
 
 
-def play_match(client: YonmokuClient, games: int, opponent: str,
+def play_match(client: YonmokuClient, games: int, opponent: str, random_opening_plies: int,
                 poll_interval: float, timeout: float) -> dict:
     wins = losses = draws = failed = 0
     for g in range(games):
@@ -29,7 +35,9 @@ def play_match(client: YonmokuClient, games: int, opponent: str,
             black_ai, white_ai, neural_color = opponent, "NEURAL", "W"
 
         try:
-            game_id = client.create_game(black_ai, white_ai)
+            game_id = client.create_game()
+            client.place_random_opening_moves(game_id, random_opening_plies)
+            client.assign_ai(game_id, black_ai, white_ai)
             history = client.wait_for_completion(game_id, poll_interval=poll_interval, timeout=timeout)
         except Exception as e:
             failed += 1
@@ -53,6 +61,10 @@ def main():
     parser.add_argument("--server", default="http://localhost:8080")
     parser.add_argument("--opponent", default="TEST3", help="DEFAULT/TEST/TEST2/TEST3/LEARN")
     parser.add_argument("--games", type=int, default=20)
+    parser.add_argument("--random-opening-plies", type=int, default=4,
+                         help="対局ごとに、AIを割り当てる前にランダムな手を何手打たせておくか。"
+                              "NEURAL・TEST3とも決定論的なので、0のままだと--gamesを増やしても"
+                              "先手・後手2パターンの繰り返しにしかならない")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=300.0,
                          help="1局あたりの最大待ち時間（秒）。NEURALはMCTS探索のぶん1手ごとに"
@@ -80,7 +92,8 @@ def main():
         time.sleep(args.wait_seconds)
 
     client = YonmokuClient(args.server)
-    result = play_match(client, args.games, args.opponent, args.poll_interval, args.timeout)
+    result = play_match(client, args.games, args.opponent, args.random_opening_plies,
+                         args.poll_interval, args.timeout)
 
     total = result["wins"] + result["losses"] + result["draws"]
     win_rate = result["wins"] / total if total else 0.0

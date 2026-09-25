@@ -25,7 +25,11 @@ param(
     [int]$EvalGames = 10,
     [string]$Server = "http://localhost:8080",
     [string]$PythonCpu = "..\.venv\Scripts\python.exe",
-    [string]$PythonGpu = "..\.venv-rocm\Scripts\python.exe"
+    [string]$PythonGpu = "..\.venv-rocm\Scripts\python.exe",
+    # Train on ALL accumulated self-play data (a growing replay buffer), not just the
+    # newest generation's file. Training on only the latest ~60 games each time was
+    # found to make win rate against TEST3 stay flat at 0% for 29 generations straight.
+    [string]$DataGlob = "data/rl_selfplay_gen*.jsonl"
 )
 
 $logFile = "training_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
@@ -34,7 +38,7 @@ function Write-Log {
     param([string]$Message)
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
     Write-Host $line
-    Add-Content -Path $logFile -Value $line
+    Add-Content -Path $logFile -Value $line -Encoding utf8
 }
 
 Write-Log "=== RL loop start: from gen ${FromGen}, ${Generations} generation(s) requested ==="
@@ -67,8 +71,8 @@ for ($i = 1; $i -le $Generations; $i++) {
         exit 1
     }
 
-    Write-Log "--- gen ${gen}: training (GPU) ---"
-    & $PythonGpu -m yonmoku_nn.train_rl --data $selfplayOut --init-checkpoint $prevCheckpoint --out $newCheckpoint
+    Write-Log "--- gen ${gen}: training (GPU, data=$DataGlob) ---"
+    & $PythonGpu -m yonmoku_nn.train_rl --data $DataGlob --init-checkpoint $prevCheckpoint --out $newCheckpoint
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: train_rl failed at gen ${gen} (exit $LASTEXITCODE). Aborting."
         exit 1
@@ -81,7 +85,7 @@ for ($i = 1; $i -le $Generations; $i++) {
     $evalOutput = & $PythonCpu -m yonmoku_nn.evaluate --server $Server --opponent TEST3 --games $EvalGames `
         --random-opening-plies 4 --concurrency 4 --candidate $newCheckpoint
     $evalExitCode = $LASTEXITCODE
-    $evalOutput | ForEach-Object { Add-Content -Path $logFile -Value $_ }
+    $evalOutput | ForEach-Object { Add-Content -Path $logFile -Value $_ -Encoding utf8 }
     if ($evalExitCode -ne 0) {
         Write-Log "WARNING: evaluate failed at gen ${gen} (exit $evalExitCode). Checkpoint was still saved; continuing to the next generation."
     } else {

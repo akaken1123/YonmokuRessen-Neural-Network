@@ -68,9 +68,17 @@ def _run_worker(worker_id: int, server: str, checkpoint: str, games: int, num_si
     client = SimulationClient(server)
 
     total = 0
+    failed = 0
     with open(out_path, "w", encoding="utf-8") as f:
         for g in range(games):
-            samples = play_one_game(network, client, num_simulations, c_puct, temperature_plies)
+            try:
+                samples = play_one_game(network, client, num_simulations, c_puct, temperature_plies)
+            except Exception as e:
+                # 1局がネットワークの瞬断などで失敗しても、このワーカーの他の対局・
+                # 他のワーカーがそれまでに集めたデータは失わずに続行する。
+                failed += 1
+                print(f"[worker {worker_id}] [{g + 1}/{games}] a game failed, skipping it: {e}")
+                continue
             for sample in samples:
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
             f.flush()
@@ -78,6 +86,8 @@ def _run_worker(worker_id: int, server: str, checkpoint: str, games: int, num_si
             winner = samples[-1]["winner"] if samples else None
             print(f"[worker {worker_id}] [{g + 1}/{games}] collected {len(samples)} positions "
                   f"(total {total}), winner={winner}")
+    if failed:
+        print(f"[worker {worker_id}] done. {failed} game(s) failed/skipped.")
     return total
 
 

@@ -5,6 +5,8 @@
 import time
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class YonmokuClient:
@@ -47,7 +49,22 @@ class SimulationClient:
         self.base_url = base_url.rstrip("/")
         # MCTSは1局・1手あたり何度もこのAPIを叩くため、リクエストのたびに新しいTCP接続を
         # 張るrequests.post()の代わりにSessionでコネクションを使い回し、往復のオーバーヘッドを減らす。
+        # ただし、並列ワーカーが多い/1手の探索に時間がかかる設定だと、プールに置かれた接続が
+        # サーバー側のkeep-alive制限時間より長く放置され、次に使おうとした瞬間に向こうから
+        # 既に切断されている（RemoteDisconnected）ことがある。/api/simulate/moveは対局登録を
+        # 一切伴わないステートレスな処理なので、再試行しても安全 → 自動リトライで吸収する。
         self.session = requests.Session()
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=0.3,
+            allowed_methods=frozenset(["GET", "POST"]),
+            status_forcelist=(502, 503, 504),
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def initial_state(self, size: int = 9) -> dict:
         """1手目より前の初期状態。GameRoom.reset()の初期値と一致させてある。"""

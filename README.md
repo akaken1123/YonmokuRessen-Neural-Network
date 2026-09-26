@@ -99,6 +99,29 @@ python -m yonmoku_nn.rl_selfplay --server http://localhost:8080 \
   --concurrency 4 --out data/rl_selfplay_gen1.jsonl
 ```
 
+### 自己対戦の戦略崩壊対策（内蔵AIとの対戦を混ぜる）
+
+方式Bをネットワーク同士の自己対戦だけで繰り返し学習し続けると、ネットワークは「自分（＝
+似た打ち方をする相手）に勝つための戦略」には強くなる一方、DEFAULTのような全く違う打ち方を
+する相手への対応力を失っていくことがある（自己対戦の戦略崩壊）。実際、TEST3の模倣から作った
+`model_base.pt`はDEFAULTに対して14.8%（27局中4勝）勝てていたのに対し、そこから26世代分の
+純粋な自己対戦でRL学習した後のモデルは、同条件（30局）で3.3%・0.0%まで下がっていた
+（同じ局数で測った実測値であり、評価のばらつきでは説明できない差）。
+
+対策として、`--vs-builtin-ratio`（既定0、例えば0.3）で指定した割合の対局を、ネットワーク
+同士ではなく片方を`--vs-builtin-levels`（既定`DEFAULT,TEST,TEST2,TEST3`）からランダムに
+選んだ内蔵AIにして対戦させられる。学習データ（MCTSの訪問回数分布）はネットワーク側の手番
+だけを記録し、内蔵AI側の手はそのまま盤面に適用するだけで教師データにはしない。
+
+```bash
+python -m yonmoku_nn.rl_selfplay --checkpoint checkpoints/model_rl_gen26.pt --games 150 \
+  --simulations 200 --concurrency 16 --vs-builtin-ratio 0.3 --out data/rl_selfplay_gen27.jsonl
+```
+
+サーバー側には、この対戦を実現するためのステートレスAPI（`POST /api/simulate/ai-move`、
+「この局面で指定レベルの内蔵AIならどこに打つか」を返すだけで実際には着手しない）を追加した
+（`/api/simulate/move`の兄弟）。
+
 ### 強い方策から始める（方式A→方式Bの組み合わせ）
 
 方式Bをランダム初期化のネットワークから始めると、序盤の自己対戦の質が低く学習が遅い。

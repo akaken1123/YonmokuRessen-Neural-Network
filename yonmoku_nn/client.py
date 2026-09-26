@@ -134,3 +134,18 @@ class SimulationClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def ai_move(self, state: dict, level: str) -> tuple[int, int] | None:
+        """この局面で内蔵AI（level）ならどこに打つかだけを聞く（着手は適用しない）。
+        自己対戦（rl_selfplay.py）に内蔵AIとの対戦も混ぜて、ネットワーク同士の対戦だけに
+        特化してしまう（自己対戦の戦略崩壊）のを防ぐために使う。"""
+        resp = self.session.post(
+            f"{self.base_url}/api/simulate/ai-move",
+            json={"state": state, "level": level},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data["row"] is None or data["col"] is None:
+            return None
+        return data["row"], data["col"]

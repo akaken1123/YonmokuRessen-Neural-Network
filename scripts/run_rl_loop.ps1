@@ -51,7 +51,15 @@ param(
     # gate and a growing replay buffer -- a high learning rate can make each generation's
     # fine-tuning step too large/unstable to compound steadily.
     [double]$Lr = 0.001,
-    [int]$TrainEpochs = 20
+    [int]$TrainEpochs = 20,
+    # Fraction (0-1) of each generation's self-play games to play against a built-in AI
+    # (chosen from -VsBuiltinLevels) instead of pure network-vs-network self-play. Guards
+    # against self-play collapse: training on nothing but self-play data can make the
+    # network strong against copies of itself while losing the ability to handle a
+    # qualitatively different opponent like DEFAULT (this is what was actually happening --
+    # see README.md).
+    [double]$VsBuiltinRatio = 0.0,
+    [string]$VsBuiltinLevels = "DEFAULT,TEST,TEST2,TEST3"
 )
 
 $logFile = "training_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
@@ -87,7 +95,7 @@ function Get-WinRate {
 }
 
 Write-Log "=== RL loop start: from gen ${FromGen}, ${Generations} generation-attempt(s) requested, gated vs $Opponent ==="
-Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / train: lr=$Lr epochs=$TrainEpochs / eval: games=$EvalGames concurrency=$EvalConcurrency"
+Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency vs-builtin-ratio=$VsBuiltinRatio($VsBuiltinLevels) / train: lr=$Lr epochs=$TrainEpochs / eval: games=$EvalGames concurrency=$EvalConcurrency"
 
 try {
     Invoke-WebRequest -Uri $Server -UseBasicParsing -TimeoutSec 5 | Out-Null
@@ -120,9 +128,10 @@ for ($i = 1; $i -le $Generations; $i++) {
     $selfplayOut = "data/rl_selfplay_gen${gen}.jsonl"
     $candidateCheckpoint = "checkpoints/model_rl_gen${gen}.pt"
 
-    Write-Log "--- gen ${gen}: self-play from $bestCheckpoint ($SelfplayGames games, simulations=$SelfplaySimulations, concurrency=$SelfplayConcurrency) ---"
+    Write-Log "--- gen ${gen}: self-play from $bestCheckpoint ($SelfplayGames games, simulations=$SelfplaySimulations, concurrency=$SelfplayConcurrency, vs-builtin-ratio=$VsBuiltinRatio) ---"
     & $PythonCpu -m yonmoku_nn.rl_selfplay --checkpoint $bestCheckpoint --games $SelfplayGames `
-        --simulations $SelfplaySimulations --concurrency $SelfplayConcurrency --out $selfplayOut
+        --simulations $SelfplaySimulations --concurrency $SelfplayConcurrency --out $selfplayOut `
+        --vs-builtin-ratio $VsBuiltinRatio --vs-builtin-levels $VsBuiltinLevels
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: rl_selfplay failed at gen ${gen} (exit $LASTEXITCODE). Aborting."
         exit 1

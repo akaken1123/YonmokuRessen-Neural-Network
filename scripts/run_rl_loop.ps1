@@ -148,7 +148,9 @@ for ($i = 1; $i -le $Generations; $i++) {
     Write-Log "--- gen ${gen}: evaluate candidate (vs $Opponent, $EvalGames games) ---"
     $candidateWinRate = Get-WinRate -Checkpoint $candidateCheckpoint
 
-    if ($candidateWinRate -gt $bestWinRate) {
+    if ($candidateWinRate -lt 0) {
+        Write-Log "gen ${gen} SKIPPED: could not evaluate $candidateCheckpoint (see WARNING above). Keeping $bestCheckpoint as the base for the next attempt."
+    } elseif ($candidateWinRate -gt $bestWinRate) {
         Write-Log "gen ${gen} PROMOTED: $candidateWinRate% > previous best $bestWinRate%. New base: $candidateCheckpoint"
         $bestCheckpoint = $candidateCheckpoint
         $bestWinRate = $candidateWinRate

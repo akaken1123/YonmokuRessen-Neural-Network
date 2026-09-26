@@ -114,10 +114,20 @@ def main():
                          args.poll_interval, args.timeout, args.concurrency)
 
     total = result["wins"] + result["losses"] + result["draws"]
-    win_rate = result["wins"] / total if total else 0.0
     print()
     print(f"vs {args.opponent}: {result['wins']}勝 {result['losses']}敗 {result['draws']}分け"
           f"（{result['failed']}局失敗/スキップ）")
+
+    if total == 0:
+        # 1局も完了しなかった場合、win rate: 0.0%と表示してしまうと「本当に0%だった」のか
+        # 「評価自体が全滅した」のか区別が付かず、呼び出し元（run_rl_loop.ps1など）が
+        # 昇格判定でこれを実際の0%として扱ってしまう(=評価失敗を検知できない)。
+        # そのため0局は明確に失敗として扱う。
+        print(f"ERROR: all {result['failed']} game(s) failed; could not measure a win rate.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    win_rate = result["wins"] / total
     print(f"win rate: {win_rate:.1%} ({total} games)")
 
 

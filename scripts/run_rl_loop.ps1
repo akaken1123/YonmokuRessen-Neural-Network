@@ -44,7 +44,13 @@ param(
     # newest generation's file.
     [string]$DataGlob = "data/rl_selfplay_gen*.jsonl",
     # Override which checkpoint to start from (defaults to checkpoints/model_rl_gen{FromGen}.pt).
-    [string]$FromCheckpoint = ""
+    [string]$FromCheckpoint = "",
+    # Passed through to train_rl.py's --lr / --epochs. Lower/fewer than train_rl.py's own
+    # defaults (1e-3 / 20) are worth trying if generations plateau even with a promotion
+    # gate and a growing replay buffer -- a high learning rate can make each generation's
+    # fine-tuning step too large/unstable to compound steadily.
+    [double]$Lr = 0.001,
+    [int]$TrainEpochs = 20
 )
 
 $logFile = "training_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
@@ -80,7 +86,7 @@ function Get-WinRate {
 }
 
 Write-Log "=== RL loop start: from gen ${FromGen}, ${Generations} generation-attempt(s) requested, gated vs $Opponent ==="
-Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / eval: games=$EvalGames"
+Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / train: lr=$Lr epochs=$TrainEpochs / eval: games=$EvalGames"
 
 try {
     Invoke-WebRequest -Uri $Server -UseBasicParsing -TimeoutSec 5 | Out-Null
@@ -121,8 +127,9 @@ for ($i = 1; $i -le $Generations; $i++) {
         exit 1
     }
 
-    Write-Log "--- gen ${gen}: training (GPU, data=$DataGlob, init=$bestCheckpoint) ---"
-    & $PythonGpu -m yonmoku_nn.train_rl --data $DataGlob --init-checkpoint $bestCheckpoint --out $candidateCheckpoint
+    Write-Log "--- gen ${gen}: training (GPU, data=$DataGlob, init=$bestCheckpoint, lr=$Lr, epochs=$TrainEpochs) ---"
+    & $PythonGpu -m yonmoku_nn.train_rl --data $DataGlob --init-checkpoint $bestCheckpoint --out $candidateCheckpoint `
+        --lr $Lr --epochs $TrainEpochs
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR: train_rl failed at gen ${gen} (exit $LASTEXITCODE). Aborting."
         exit 1
@@ -131,10 +138,12 @@ for ($i = 1; $i -le $Generations; $i++) {
     Write-Log "--- gen ${gen}: evaluate candidate (vs $Opponent, $EvalGames games) ---"
     $candidateWinRate = Get-WinRate -Checkpoint $candidateCheckpoint
 
-    if ($candidateWinRate -ge $bestWinRate) {
-        Write-Log "gen ${gen} PROMOTED: $candidateWinRate% >= previous best $bestWinRate%. New base: $candidateCheckpoint"
+    if ($candidateWinRate -gt $bestWinRate) {
+        Write-Log "gen ${gen} PROMOTED: $candidateWinRate% > previous best $bestWinRate%. New base: $candidateCheckpoint"
         $bestCheckpoint = $candidateCheckpoint
         $bestWinRate = $candidateWinRate
+    } elseif ($candidateWinRate -eq $bestWinRate) {
+        Write-Log "gen ${gen} TIED: $candidateWinRate% == previous best $bestWinRate%. Keeping $bestCheckpoint as the base for the next attempt (no strict improvement, so not promoted)."
     } else {
         Write-Log "gen ${gen} REJECTED: $candidateWinRate% < previous best $bestWinRate%. Keeping $bestCheckpoint as the base for the next attempt."
     }

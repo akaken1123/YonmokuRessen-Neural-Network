@@ -36,6 +36,7 @@ param(
     [int]$SelfplaySimulations = 200,
     [int]$SelfplayConcurrency = 6,
     [int]$EvalGames = 10,
+    [int]$EvalConcurrency = 4,
     [string]$Opponent = "DEFAULT",
     [string]$Server = "http://localhost:8080",
     [string]$PythonCpu = "..\.venv\Scripts\python.exe",
@@ -69,7 +70,7 @@ function Get-WinRate {
     param([string]$Checkpoint)
 
     $output = & $PythonCpu -m yonmoku_nn.evaluate --server $Server --opponent $Opponent --games $EvalGames `
-        --random-opening-plies 4 --concurrency 4 --candidate $Checkpoint
+        --random-opening-plies 4 --concurrency $EvalConcurrency --candidate $Checkpoint
     $exitCode = $LASTEXITCODE
     $output | ForEach-Object { Add-Content -Path $logFile -Value $_ -Encoding utf8 }
 
@@ -86,7 +87,7 @@ function Get-WinRate {
 }
 
 Write-Log "=== RL loop start: from gen ${FromGen}, ${Generations} generation-attempt(s) requested, gated vs $Opponent ==="
-Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / train: lr=$Lr epochs=$TrainEpochs / eval: games=$EvalGames"
+Write-Log "selfplay: games=$SelfplayGames simulations=$SelfplaySimulations concurrency=$SelfplayConcurrency / train: lr=$Lr epochs=$TrainEpochs / eval: games=$EvalGames concurrency=$EvalConcurrency"
 
 try {
     Invoke-WebRequest -Uri $Server -UseBasicParsing -TimeoutSec 5 | Out-Null

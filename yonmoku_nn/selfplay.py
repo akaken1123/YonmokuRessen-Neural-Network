@@ -32,8 +32,20 @@ def _initial_state(size: int) -> dict:
 
 
 def collect_game(client: YonmokuClient, black_ai: str, white_ai: str,
-                  poll_interval: float, timeout: float) -> list[dict]:
-    game_id = client.create_game(black_ai, white_ai)
+                  poll_interval: float, timeout: float, random_opening_plies: int = 0) -> list[dict]:
+    """1局分の教師データ（実際に打たれた手を模倣するための「局面→手」）を集める。
+
+    black_ai/white_aiは決定論的（乱数を使わない）AIがほとんどなため、random_opening_pliesを
+    指定すると、AIを割り当てる前に最初の数手をランダムに打っておく（evaluate.pyと同じ手法）。
+    これが無いと、同じ組み合わせのAI同士は毎回ほぼ同じ対局を繰り返すだけになり、--gamesを
+    増やしても学習データの多様性がほとんど増えない。ランダムに打った手自体は「見本にすべき
+    良い手」ではないため、その分の局面はstate_before側の plyCount で判定して学習データから
+    除外する（record_from_ply以降のみ記録する）。
+    """
+    game_id = client.create_game()
+    if random_opening_plies > 0:
+        client.place_random_opening_moves(game_id, random_opening_plies)
+    client.assign_ai(game_id, black_ai, white_ai)
     history = client.wait_for_completion(game_id, poll_interval=poll_interval, timeout=timeout)
     if not history:
         return []
@@ -45,7 +57,7 @@ def collect_game(client: YonmokuClient, black_ai: str, white_ai: str,
     prev_state = _initial_state(size)
     for state in history:
         move = state.get("lastMove")
-        if move is not None:
+        if move is not None and prev_state.get("plyCount", 0) >= random_opening_plies:
             samples.append({
                 "state_before": prev_state,
                 "move": {"row": move["row"], "col": move["col"], "color": move["color"]},
@@ -70,6 +82,10 @@ def main():
     parser.add_argument("--concurrency", type=int, default=4,
                          help="同時に進行させる対局数。サーバー側は対局ごとに独立したスレッドで"
                               "進むため、増やすほど収集が速くなる（CPUコア数に応じて調整）")
+    parser.add_argument("--random-opening-plies", type=int, default=4,
+                         help="AIを割り当てる前に、対局ごとに何手ランダムに打っておくか。"
+                              "決定論的なAI同士（TEST3同士など）は0のままだと--gamesを増やしても"
+                              "ほぼ同じ対局を繰り返すだけになり、学習データの多様性が増えない")
     args = parser.parse_args()
 
     client = YonmokuClient(args.server)
@@ -82,7 +98,7 @@ def main():
             ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futures = [
             executor.submit(collect_game, client, args.black_ai, args.white_ai,
-                             args.poll_interval, args.timeout)
+                             args.poll_interval, args.timeout, args.random_opening_plies)
             for _ in range(args.games)
         ]
         failed = 0

@@ -157,6 +157,18 @@ NEURAL・TEST3とも着手選択が完全に決定論的（乱数を使わない
 並行して評価できる（`selfplay.py`と同じ理屈）。4局を試した実測で、直列（`--concurrency 1`）
 3分17秒→並列（`--concurrency 4`）1分37秒とおよそ2倍速くなった。
 
+`--ai`（既定`NEURAL`）で評価したい側のAIレベルを指定できる。NEURAL以外（例：`TEST4`）を
+指定すれば、NEURALを介さずに内蔵AI同士（例：TEST3対TEST4）の強さ比較にもそのまま使える
+（この場合`--candidate`は無視される。モデル差し替えはNEURAL専用のため）。
+
+```bash
+python -m yonmoku_nn.evaluate --ai TEST4 --opponent TEST3 --games 100 --concurrency 6 --timeout 300
+```
+
+TEST3・TEST4は反復深化の持ち時間（1手あたり約1.2秒）を毎手使い切るため、1局あたり数十秒〜
+数分かかる。`--games`を増やすほど並列数（`--concurrency`）とサーバーのCPUコア数に見合った
+時間がかかる点に注意（`--timeout`も内蔵AI同士なら300秒程度で十分なことが多い）。
+
 ### 強化学習ループの自動化（`scripts/run_rl_loop.ps1`）
 
 自己対戦→学習→評価を1世代ごとに手動で3コマンド打つ代わりに、指定した世代数だけ

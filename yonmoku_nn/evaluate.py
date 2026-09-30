@@ -1,18 +1,21 @@
-"""NEURAL AIの強さを、既存の内蔵AI（既定でTEST3）との対局を通じて客観的に測る。
+"""AIレベル同士の強さを、実際の対局を通じて客観的に測る（既定は--ai NEURAL vs --opponent TEST3）。
 
 強化学習ループ（rl_selfplay → train_rl → export）を1世代回すたびに「本当に強くなったか」を
 確認せずに次の世代へ進むと、弱くなっていることに気づけない。対局は実際にサーバーへ
 （AiVsAiDriverで）作らせるので、対局時の挙動（NeuralMcts含む）をそのまま評価できる。
 
+--aiにNEURAL以外（TEST3/TEST4など内蔵AI同士の比較）を指定することもできる。この場合は
+--candidateによるモデル差し替えは行わない（NEURAL専用の仕組みのため）。
+
 --candidateを指定すると、その.ptチェックポイントを一時的にエクスポートしてサーバーの
 NEURAL_MODEL_FILEに反映してから評価する（サーバーの自動リロードが検知するまで少し待つ）。
 省略した場合は、サーバーに現在読み込まれているモデルをそのまま評価する。
 
-NEURAL（NeuralMcts）もTEST3（アルファベータ）も着手選択が完全に決定論的（乱数を使わない）
-なため、何も工夫しないと「NEURALが先手」「NEURALが後手」の2パターンしか実質的な対局が
-存在せず、--gamesを増やしても同じ対局を繰り返すだけになる。それを避けるため、対局ごとに
-最初の数手（--random-opening-plies）だけランダムな手を人間役として打ってから、両者に
-AIを割り当てて残りを進めさせる（サーバー側の新しいAPI: POST /api/games/{id}/ai）。
+内蔵AI（NEURALのNeuralMctsも含む）は着手選択が完全に決定論的（乱数を使わない）なため、
+何も工夫しないと「--aiが先手」「--aiが後手」の2パターンしか実質的な対局が存在せず、
+--gamesを増やしても同じ対局を繰り返すだけになる。それを避けるため、対局ごとに最初の数手
+（--random-opening-plies）だけランダムな手を人間役として打ってから、両者にAIを割り当てて
+残りを進めさせる（サーバー側の新しいAPI: POST /api/games/{id}/ai）。
 
 対局の進行自体はサーバー側のAiVsAiDriverが独立したスレッドで行うため、selfplay.pyと同様に
 ThreadPoolExecutorで複数局を並行して作成・待機できる（--concurrency）。rl_selfplay.pyの
@@ -29,9 +32,9 @@ from pathlib import Path
 from .client import YonmokuClient
 
 
-def _play_one_game(client: YonmokuClient, opponent: str, random_opening_plies: int,
-                    poll_interval: float, timeout: float, neural_color: str) -> str:
-    black_ai, white_ai = ("NEURAL", opponent) if neural_color == "B" else (opponent, "NEURAL")
+def _play_one_game(client: YonmokuClient, ai_level: str, opponent: str, random_opening_plies: int,
+                    poll_interval: float, timeout: float, ai_color: str) -> str:
+    black_ai, white_ai = (ai_level, opponent) if ai_color == "B" else (opponent, ai_level)
     game_id = client.create_game()
     client.place_random_opening_moves(game_id, random_opening_plies)
     client.assign_ai(game_id, black_ai, white_ai)
@@ -39,19 +42,19 @@ def _play_one_game(client: YonmokuClient, opponent: str, random_opening_plies: i
     return history[-1]["winner"]
 
 
-def play_match(client: YonmokuClient, games: int, opponent: str, random_opening_plies: int,
+def play_match(client: YonmokuClient, games: int, ai_level: str, opponent: str, random_opening_plies: int,
                poll_interval: float, timeout: float, concurrency: int) -> dict:
     wins = losses = draws = failed = 0
     completed = 0
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         # 先後を交互にして、色による有利不利（先手番の方が有利、等）を打ち消す。
         futures = {
-            executor.submit(_play_one_game, client, opponent, random_opening_plies,
+            executor.submit(_play_one_game, client, ai_level, opponent, random_opening_plies,
                              poll_interval, timeout, "B" if g % 2 == 0 else "W"): ("B" if g % 2 == 0 else "W")
             for g in range(games)
         }
         for future in as_completed(futures):
-            neural_color = futures[future]
+            ai_color = futures[future]
             completed += 1
             try:
                 winner = future.result()
@@ -60,21 +63,25 @@ def play_match(client: YonmokuClient, games: int, opponent: str, random_opening_
                 print(f"[{completed}/{games}] a game failed, skipping it: {e}")
                 continue
 
-            if winner == neural_color:
+            if winner == ai_color:
                 wins += 1
             elif winner is None or winner == "draw":
                 draws += 1
             else:
                 losses += 1
-            print(f"[{completed}/{games}] NEURAL={neural_color} vs {opponent} -> winner={winner}")
+            print(f"[{completed}/{games}] {ai_level}={ai_color} vs {opponent} -> winner={winner}")
 
     return {"wins": wins, "losses": losses, "draws": draws, "failed": failed}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NEURAL AIの強さを既存AIとの対局で評価する")
+    parser = argparse.ArgumentParser(description="AIレベル同士の強さを対局で評価する（既定はNEURAL vs TEST3）")
     parser.add_argument("--server", default="http://localhost:8080")
-    parser.add_argument("--opponent", default="TEST3", help="DEFAULT/TEST/TEST2/TEST3/LEARN")
+    parser.add_argument("--ai", default="NEURAL",
+                         help="評価したい側のAIレベル。DEFAULT/TEST/TEST2/TEST3/TEST4/LEARN/NEURAL。"
+                              "NEURAL以外を指定した場合、--candidateは無視される（モデル差し替えは"
+                              "NEURAL専用のため）")
+    parser.add_argument("--opponent", default="TEST3", help="DEFAULT/TEST/TEST2/TEST3/TEST4/LEARN/NEURAL")
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--random-opening-plies", type=int, default=4,
                          help="対局ごとに、AIを割り当てる前にランダムな手を何手打たせておくか。"
@@ -99,23 +106,26 @@ def main():
     args = parser.parse_args()
 
     if args.candidate:
-        out_path = Path(args.model_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"exporting {args.candidate} -> {args.model_file}")
-        subprocess.run(
-            [sys.executable, "-m", "yonmoku_nn.export", "--checkpoint", args.candidate, "--out", args.model_file],
-            check=True,
-        )
-        print(f"waiting {args.wait_seconds}s for the server to auto-reload the new model...")
-        time.sleep(args.wait_seconds)
+        if args.ai != "NEURAL":
+            print(f"WARNING: --candidate is ignored because --ai is {args.ai}, not NEURAL", file=sys.stderr)
+        else:
+            out_path = Path(args.model_file)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            print(f"exporting {args.candidate} -> {args.model_file}")
+            subprocess.run(
+                [sys.executable, "-m", "yonmoku_nn.export", "--checkpoint", args.candidate, "--out", args.model_file],
+                check=True,
+            )
+            print(f"waiting {args.wait_seconds}s for the server to auto-reload the new model...")
+            time.sleep(args.wait_seconds)
 
     client = YonmokuClient(args.server)
-    result = play_match(client, args.games, args.opponent, args.random_opening_plies,
+    result = play_match(client, args.games, args.ai, args.opponent, args.random_opening_plies,
                          args.poll_interval, args.timeout, args.concurrency)
 
     total = result["wins"] + result["losses"] + result["draws"]
     print()
-    print(f"vs {args.opponent}: {result['wins']}勝 {result['losses']}敗 {result['draws']}分け"
+    print(f"{args.ai} vs {args.opponent}: {result['wins']}勝 {result['losses']}敗 {result['draws']}分け"
           f"（{result['failed']}局失敗/スキップ）")
 
     if total == 0:
